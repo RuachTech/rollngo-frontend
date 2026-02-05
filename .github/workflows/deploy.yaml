@@ -1,0 +1,199 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      branch:
+        description: "Branch to deploy"
+        required: true
+        default: "main"
+        type: string
+      image_tag:
+        description: "Docker image tag (leave empty for latest/staging default)"
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ruachtech/rollngo-frontend
+  PACKAGE_NAME: rollngo-frontend
+
+jobs:
+  test:
+    permissions:
+      contents: read
+    name: Lint
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+  build:
+    needs: test
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine environment
+        id: env
+        run: |
+          # Manual workflow dispatch takes precedence
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            if [[ -n "${{ github.event.inputs.image_tag }}" ]]; then
+              echo "image_tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+            elif [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+              echo "image_tag=latest" >> $GITHUB_OUTPUT
+            else
+              echo "image_tag=staging" >> $GITHUB_OUTPUT
+            fi
+          # Automatic triggers
+          elif [[ "${{ github.ref }}" == "refs/heads/production" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "image_tag=staging" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "image_tag=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "image_tag=staging-pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine Bump Type from Commit Message
+        id: bump_type
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
+          if echo "$COMMIT_MSG" | grep -qE "BREAKING CHANGE|!:"; then
+            echo "BUMP=major" >> $GITHUB_ENV
+          elif echo "$COMMIT_MSG" | grep -iq "^feat:"; then
+            echo "BUMP=minor" >> $GITHUB_ENV
+          elif echo "$COMMIT_MSG" | grep -iq "^fix:"; then
+            echo "BUMP=patch" >> $GITHUB_ENV
+          else
+            echo "No matching keyword found, defaulting to patch."
+            echo "BUMP=patch" >> $GITHUB_ENV
+          fi
+
+      - name: Determine Next Semantic Version
+        id: next_version
+        env:
+          OWNER: ${{ github.repository_owner }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          PACKAGE_NAME: ${{ env.PACKAGE_NAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER_TYPE_VALUE="${OWNER_TYPE:-Organization}"
+          OWNER_PATH="users"
+          if [ "$OWNER_TYPE_VALUE" = "Organization" ]; then
+            OWNER_PATH="orgs"
+          fi
+
+          API_URL="${GITHUB_API_URL:-https://api.github.com}/$OWNER_PATH/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100"
+          RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API_URL")
+
+          if echo "$RESPONSE" | jq -e '. | type == "array"' >/dev/null 2>&1; then
+            TAGS=$(echo "$RESPONSE" | jq -r '.[]?.metadata?.container?.tags[]?' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u || true)
+          else
+            TAGS=""
+          fi
+
+          if [[ -z "$TAGS" ]]; then
+            NEXT_VERSION="1.0.0"
+          else
+            LAST_VERSION=$(echo "$TAGS" | sort -V | tail -n 1)
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LAST_VERSION"
+
+            case "$BUMP" in
+              major)
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+                ;;
+              minor)
+                MINOR=$((MINOR + 1))
+                PATCH=0
+                ;;
+              *)
+                PATCH=$((PATCH + 1))
+                ;;
+            esac
+
+            NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+
+          echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_ENV
+          echo "Next semantic version: $NEXT_VERSION"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=${{ steps.env.outputs.image_tag }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/production' }}
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ env.NEXT_VERSION }}${{ steps.env.outputs.environment == 'production' && '-prod' || '' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/feat/') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            VITE_BACKEND_URL=${{ vars.VITE_BACKEND_URL }}
+            VITE_RECAPTCHA_SITE_KEY=${{ vars.VITE_RECAPTCHA_SITE_KEY }}
