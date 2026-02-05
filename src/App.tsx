@@ -103,8 +103,8 @@ function App() {
                   </div>
                 </div>
                 <div className="flex items-center gap-4 mb-4">
-                  <span className="text-3xl text-gray-400 line-through">₦4000</span>
-                  <span className="text-5xl font-extrabold text-yellow-300">₦2000</span>
+                  <span className="text-3xl text-gray-400 line-through">₦6000</span>
+                  <span className="text-5xl font-extrabold text-yellow-300">₦3000</span>
                 </div>
                 <p className="text-orange-200 mb-6">Perfectly seasoned chicken wrapped in warm flatbread with fresh veggies</p>
                 <a
@@ -125,8 +125,8 @@ function App() {
                   </div>
                 </div>
                 <div className="flex items-center gap-4 mb-4">
-                  <span className="text-3xl text-gray-400 line-through">₦4500</span>
-                  <span className="text-5xl font-extrabold text-yellow-300">₦2500</span>
+                  <span className="text-3xl text-gray-400 line-through">₦7000</span>
+                  <span className="text-5xl font-extrabold text-yellow-300">₦3500</span>
                 </div>
                 <p className="text-orange-200 mb-6">Double the deliciousness! Extra sausage for the ultimate satisfaction</p>
                 <a
