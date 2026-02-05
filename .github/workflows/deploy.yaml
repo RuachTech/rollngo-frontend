@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: read
     name: Lint
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
 
   build:
     needs: test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
